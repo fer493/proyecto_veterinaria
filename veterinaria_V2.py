@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Apr 14 00:02:12 2025
+
 
 @author: Fernando Marquez Arres
 """
@@ -39,22 +39,34 @@ class Propietario:
         self.email = email
     
     def asociar_animal(self, animal_id, db):
-        if not animal_id or not isinstance(animal_id, int):
+        try:
+            animal_id = int(animal_id)
+        except (ValueError, TypeError):
             messagebox.showerror("Error", "ID de animal inválido")
             return False
-            
+        
         try:
-            cursor = db.conn.cursor()
-            cursor.execute(
-                "INSERT INTO Propietario_Animal (propietario_id, animal_id) VALUES (?, ?)",
-                (self.id, animal_id)
-            )
-            db.conn.commit()
-            return True
+             cursor = db.conn.cursor()
+             # Verificar que la relación no existe ya
+             cursor.execute(
+                 "SELECT * FROM Propietario_Animal WHERE propietario_id = ? AND animal_id = ?",
+                 (self.id, animal_id)
+             )
+             if cursor.fetchone():
+                 messagebox.showerror("Error", "Esta asociación ya existe")
+                 return False
+            
+             cursor.execute(
+                 "INSERT INTO Propietario_Animal (propietario_id, animal_id) VALUES (?, ?)",
+                 (self.id, animal_id)
+             )
+             db.conn.commit()
+             return True
         except sqlite3.Error as e:
-            db.conn.rollback()
-            messagebox.showerror("Error", f"Error de base de datos: {str(e)}")
-            return False
+             db.conn.rollback()
+             messagebox.showerror("Error", f"Error de base de datos: {str(e)}")
+             return False
+            
 
 class Administrador:
     def __init__(self, id=None, nombre=None, email=None, password=None):
@@ -113,13 +125,19 @@ class Recepcionista:
         if not animal or not isinstance(animal, Animal):
             messagebox.showerror("Error", "Datos del animal inválidos")
             return False
-            
+        
         if not animal.id or not isinstance(animal.id, int):
             messagebox.showerror("Error", "ID de animal inválido")
             return False
-            
+        
         try:
             cursor = db.conn.cursor()
+            # Verificar que el animal existe
+            cursor.execute("SELECT id FROM Animal WHERE id = ?", (animal.id,))
+            if not cursor.fetchone():
+                messagebox.showerror("Error", f"No existe un animal con ID {animal.id}")
+                return False
+            
             cursor.execute(
                 """UPDATE Animal 
                 SET nombre = ?, especie = ?, raza = ?, fecha_nacimiento = ?
@@ -173,32 +191,63 @@ class Veterinario:
         return hashlib.sha256(password.encode()).hexdigest()
     
     def buscar_historial(self, animal_id, db):
-        if not animal_id or not isinstance(animal_id, int):
+        try:
+            animal_id = int(animal_id)
+        except (ValueError, TypeError):
             messagebox.showerror("Error", "ID de animal inválido")
             return None
-            
+        
         try:
             cursor = db.conn.cursor()
+            # Primero verificar que el animal existe
+            cursor.execute("SELECT id FROM Animal WHERE id = ?", (animal_id,))
+            if not cursor.fetchone():
+                messagebox.showerror("Error", f"No existe un animal con ID {animal_id}")
+                return None
+            
             cursor.execute(
                 "SELECT fecha, tipo, descripcion, tratamiento FROM HistorialMedico WHERE animal_id = ? ORDER BY fecha DESC",
                 (animal_id,)
             )
-            return cursor.fetchall()
+            historial_medico=cursor.fetchall()
+        
+            cursor.execute(
+                """SELECT c.fecha, s.nombre, c.motivo, v.nombre 
+                FROM Cita c
+                JOIN Servicio s ON c.servicio_id = s.id
+                JOIN Veterinario v ON c.veterinario_id = v.id
+                WHERE c.animal_id = ?
+                ORDER BY c.fecha DESC""",
+                (animal_id,)
+            )
+            citas = cursor.fetchall()
+            
+            return {
+                'historial_medico': historial_medico,
+                'citas': citas
+            }
         except sqlite3.Error as e:
             messagebox.showerror("Error", f"Error de base de datos: {str(e)}")
             return None
     
     def registrar_tratamiento(self, animal_id, tipo, descripcion, tratamiento, db):
-        if not animal_id or not isinstance(animal_id, int):
+        try:
+            animal_id = int(animal_id)
+        except (ValueError, TypeError):
             messagebox.showerror("Error", "ID de animal inválido")
             return False
-            
+        
         if not tipo or not isinstance(tipo, str):
             messagebox.showerror("Error", "Tipo de tratamiento inválido")
             return False
-            
+        
         try:
             cursor = db.conn.cursor()
+            cursor.execute("SELECT id FROM Animal WHERE id = ?", (animal_id,))
+            if not cursor.fetchone():
+                messagebox.showerror("Error", f"No existe un animal con ID {animal_id}")
+                return False
+            
             cursor.execute(
                 """INSERT INTO HistorialMedico 
                 (fecha, tipo, descripcion, tratamiento, animal_id, veterinario_id)
@@ -465,6 +514,10 @@ class Database:
         except sqlite3.Error as e:
             self.conn.rollback()
             messagebox.showerror("Error", f"Error al insertar datos de prueba: {str(e)}")
+            
+         
+            
+            
 
 # ====================== INTERFAZ DE USUARIO ======================
 
@@ -555,6 +608,9 @@ class PanelPrincipal:
         self.nombre_usuario = nombre_usuario
         self.cuaderno = ttk.Notebook(root)
         self.cuaderno.pack(expand=True, fill="both")
+        self.texto_historial = None  # Lo inicializaremos después
+        self.style = ttk.Style()
+        self.style.configure('Titulo.TLabel', font=('Arial', 10, 'bold'))
         
         self.crear_menu()
         self.crear_pestanas()
@@ -591,32 +647,78 @@ class PanelPrincipal:
     def pestanas_propietario(self):
         pestana1 = ttk.Frame(self.cuaderno)
         self.cuaderno.add(pestana1, text="Asociar Animal")
-        
+    
+        # Mostrar ID del animal seleccionado
         tk.Label(pestana1, text="ID del Animal:").pack()
-        entrada_id_animal = tk.Entry(pestana1)
-        entrada_id_animal.pack()
-        
-        tk.Button(pestana1, text="Asociar a mi cuenta", 
-                 command=lambda: self.asociar_animal_propietario(entrada_id_animal.get())).pack(pady=10)
-        
+        self.id_animal_asociar = tk.Label(pestana1, text="")
+        self.id_animal_asociar.pack()
+    
+        # Combobox para seleccionar animal
+        tk.Label(pestana1, text="Seleccionar Animal:").pack()
         cursor = self.db.conn.cursor()
         cursor.execute("""
         SELECT a.id, a.nombre, a.especie 
         FROM Animal a
         LEFT JOIN Propietario_Animal pa ON a.id = pa.animal_id
         WHERE pa.animal_id IS NULL
-        """)
-        for animal in cursor.fetchall():
-            tk.Label(pestana1, text=f"ID: {animal[0]} - {animal[1]} ({animal[2]})").pack()
-        
+         """)
+        animales = [f"{id} - {nombre} ({especie})" for id, nombre, especie in cursor.fetchall()]
+    
+        combobox_animal = ttk.Combobox(pestana1, values=animales, state="readonly")
+        combobox_animal.pack(pady=5)
+        combobox_animal.bind("<<ComboboxSelected>>", lambda e: self.id_animal_asociar.config(
+            text=combobox_animal.get().split(" - ")[0]))
+    
+        # Botón para asociar
+        tk.Button(pestana1, text="Asociar a mi cuenta", 
+                 command=lambda: self.asociar_animal_propietario(
+                     combobox_animal.get().split(" - ")[0]
+                 )).pack(pady=10)
+    
+        # Lista de animales disponibles
+        tk.Label(pestana1, text="Animales disponibles para asociar:").pack(pady=10)
+        for animal in animales:
+            tk.Label(pestana1, text=animal).pack()
+    
         pestana2 = ttk.Frame(self.cuaderno)
         self.cuaderno.add(pestana2, text="Mis Animales")
         self.mostrar_animales_propietario(pestana2)
 
     def asociar_animal_propietario(self, id_animal):
+        try:
+            id_animal = int(id_animal)
+        except (ValueError, TypeError):
+             messagebox.showerror("Error", "ID de animal inválido")
+             return
+        
+        # Verificar que el animal existe y no está ya asociado
+        cursor = self.db.conn.cursor()
+        cursor.execute("SELECT id FROM Animal WHERE id = ?", (id_animal,))
+        if not cursor.fetchone():
+            messagebox.showerror("Error", f"No existe un animal con ID {id_animal}")
+            return
+    
+        cursor.execute("""
+        SELECT animal_id FROM Propietario_Animal 
+        WHERE animal_id = ? AND propietario_id = ?
+        """, (id_animal, self.id_usuario))
+        if cursor.fetchone():
+            messagebox.showerror("Error", "Este animal ya está asociado a tu cuenta")
+            return
+    
         propietario = Propietario(id=self.id_usuario)
         if propietario.asociar_animal(id_animal, self.db):
             messagebox.showinfo("Éxito", "Animal asociado correctamente")
+             # Actualizar la lista de animales
+            for widget in self.cuaderno.winfo_children():
+                if isinstance(widget, ttk.Notebook):
+                    for tab_id in widget.tabs():
+                        if "Mis Animales" in widget.tab(tab_id, "text"):
+                            widget.forget(tab_id)
+                            new_tab = ttk.Frame(widget)
+                            widget.add(new_tab, text="Mis Animales")
+                            self.mostrar_animales_propietario(new_tab)
+                            break
 
     def mostrar_animales_propietario(self, pestana):
         cursor = self.db.conn.cursor()
@@ -683,10 +785,14 @@ class PanelPrincipal:
         cursor = self.db.conn.cursor()
         cursor.execute("SELECT id, nombre FROM Animal")
         animales = [f"{id} - {nombre}" for id, nombre in cursor.fetchall()]
-        
-        tk.Label(pestana, text="Seleccionar Animal:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+    
+        tk.Label(pestana, text="ID del Animal:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.id_animal_label = tk.Label(pestana, text="")
+        self.id_animal_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+    
+        tk.Label(pestana, text="Seleccionar Animal:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
         combobox_animal = ttk.Combobox(pestana, values=animales, state="readonly")
-        combobox_animal.grid(row=0, column=1, padx=5, pady=5)
+        combobox_animal.grid(row=1, column=1, padx=5, pady=5)
         
         campos = [
             ("Nombre:", tk.Entry(pestana)),
@@ -714,22 +820,38 @@ class PanelPrincipal:
                  )).grid(row=len(campos)+2, columnspan=2, pady=10)
 
     def cargar_datos_animal(self, id_animal, campos):
-        cursor = self.db.conn.cursor()
-        cursor.execute("SELECT nombre, especie, raza, fecha_nacimiento FROM Animal WHERE id = ?", (id_animal,))
-        datos_animal = cursor.fetchone()
+        try:
+            id_animal = int(id_animal)
+            self.id_animal_label.config(text=str(id_animal))  # Actualizar el label del ID
         
-        if datos_animal:
-            animal = Animal(*datos_animal)
-            campos[0][1].delete(0, tk.END)
-            campos[0][1].insert(0, animal.nombre)
-            campos[1][1].delete(0, tk.END)
-            campos[1][1].insert(0, animal.especie if animal.especie else "")
-            campos[2][1].delete(0, tk.END)
-            campos[2][1].insert(0, animal.raza if animal.raza else "")
-            campos[3][1].delete(0, tk.END)
-            campos[3][1].insert(0, animal.fecha_nacimiento if animal.fecha_nacimiento else "")
+            cursor = self.db.conn.cursor()
+            cursor.execute("SELECT nombre, especie, raza, fecha_nacimiento FROM Animal WHERE id = ?", (id_animal,))
+            datos_animal = cursor.fetchone()
+        
+            if datos_animal:
+                # Limpiar todos los campos primero
+                for campo in campos:
+                    campo[1].delete(0, tk.END)
+            
+                # Llenar los campos en el orden correcto
+                campos[0][1].insert(0, datos_animal[0])  # Nombre
+                campos[1][1].insert(0, datos_animal[1])  # Especie
+                campos[2][1].insert(0, datos_animal[2])  # Raza
+                campos[3][1].insert(0, datos_animal[3] if datos_animal[3] else "")  # Fecha nacimiento
+            
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "ID de animal inválido")
+        except sqlite3.Error as e:
+            messagebox.showerror("Error", f"Error de base de datos: {str(e)}")
 
     def actualizar_animal(self, id_animal, nombre, especie, raza, fecha_nacimiento):
+        try:
+            
+            id_animal = int(id_animal)  # Convertir a entero
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "ID de animal inválido")
+            return
+       
         animal = Animal(id=id_animal, nombre=nombre, especie=especie, raza=raza, fecha_nacimiento=fecha_nacimiento)
         recepcionista = Recepcionista(id=self.id_usuario)
         if recepcionista.actualizar_datos_animal(animal, self.db):
@@ -852,71 +974,131 @@ class PanelPrincipal:
         cursor = self.db.conn.cursor()
         cursor.execute("SELECT id, nombre FROM Animal")
         animales = [f"{id} - {nombre}" for id, nombre in cursor.fetchall()]
-        
-        tk.Label(pestana, text="Animal:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+    
+        tk.Label(pestana, text="ID del Animal:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.id_animal_historial = tk.Label(pestana, text="")
+        self.id_animal_historial.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+    
+        tk.Label(pestana, text="Seleccionar Animal:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
         combobox_animal = ttk.Combobox(pestana, values=animales, state="readonly")
-        combobox_animal.grid(row=0, column=1, padx=5, pady=5)
-        
-        tk.Button(pestana, text="Buscar", 
+        combobox_animal.grid(row=1, column=1, padx=5, pady=5)
+        combobox_animal.bind("<<ComboboxSelected>>", lambda e: self.id_animal_historial.config(
+             text=combobox_animal.get().split(" - ")[0]))
+    
+        tk.Button(pestana, text="Buscar Historial", 
                  command=lambda: self.mostrar_historial(
-                     pestana, combobox_animal.get().split(" - ")[0]
-                 )).grid(row=1, columnspan=2, pady=10)
-        
+                     pestana, 
+                     combobox_animal.get().split(" - ")[0]
+                 )).grid(row=2, columnspan=2, pady=10)
+    
         self.texto_historial = scrolledtext.ScrolledText(pestana, wrap=tk.WORD, width=60, height=15)
-        self.texto_historial.grid(row=2, columnspan=2, padx=5, pady=5, sticky="nsew")
+        self.texto_historial.grid(row=3, columnspan=2, padx=5, pady=5, sticky="nsew")
 
     def mostrar_historial(self, pestana, id_animal):
         self.texto_historial.delete(1.0, tk.END)
-        
-        veterinario = Veterinario(id=self.id_usuario)
-        historial = veterinario.buscar_historial(id_animal, self.db)
-        
-        if not historial:
-            self.texto_historial.insert(tk.END, "No hay registros médicos para este animal")
+    
+        try:
+            id_animal = int(id_animal)
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "ID de animal inválido")
             return
-        
-        for registro in historial:
-            fecha, tipo, descripcion, tratamiento = registro
-            self.texto_historial.insert(tk.END, f"Fecha: {fecha}\n")
-            self.texto_historial.insert(tk.END, f"Tipo: {tipo}\n")
-            self.texto_historial.insert(tk.END, f"Descripción:\n{descripcion}\n")
-            if tratamiento:
-                self.texto_historial.insert(tk.END, f"Tratamiento:\n{tratamiento}\n")
-            self.texto_historial.insert(tk.END, "-"*50 + "\n\n")
+    
+        veterinario = Veterinario(id=self.id_usuario)
+        historial_completo = veterinario.buscar_historial(id_animal, self.db)
+    
+        if not historial_completo:
+            self.texto_historial.insert(tk.END, "No hay registros para este animal")
+            return
+    
+        # Mostrar citas primero
+        self.texto_historial.insert(tk.END, "=== CITAS ===\n\n", 'titulo')
+        if historial_completo['citas']:
+            for cita in historial_completo['citas']:
+                fecha, servicio, motivo, veterinario = cita
+                self.texto_historial.insert(tk.END, f"Fecha: {fecha}\n")
+                self.texto_historial.insert(tk.END, f"Servicio: {servicio}\n")
+                self.texto_historial.insert(tk.END, f"Motivo: {motivo}\n")
+                self.texto_historial.insert(tk.END, f"Veterinario: {veterinario}\n")
+                self.texto_historial.insert(tk.END, "-"*50 + "\n\n")
+        else:
+            self.texto_historial.insert(tk.END, "No hay citas registradas\n\n")
+    
+        # Mostrar historial médico
+        self.texto_historial.insert(tk.END, "\n=== HISTORIAL MÉDICO ===\n\n", 'titulo')
+        if historial_completo['historial_medico']:
+            for registro in historial_completo['historial_medico']:
+                fecha, tipo, descripcion, tratamiento = registro
+                self.texto_historial.insert(tk.END, f"Fecha: {fecha}\n")
+                self.texto_historial.insert(tk.END, f"Tipo: {tipo}\n")
+                self.texto_historial.insert(tk.END, f"Descripción:\n{descripcion}\n")
+                if tratamiento:
+                    self.texto_historial.insert(tk.END, f"Tratamiento:\n{tratamiento}\n")
+                self.texto_historial.insert(tk.END, "-"*50 + "\n\n")
+        else:
+            self.texto_historial.insert(tk.END, "No hay registros médicos\n")
+    
+        # Configurar estilo para los títulos
+        self.texto_historial.tag_config('titulo', font=('Arial', 10, 'bold'))
 
     def pestana_registrar_tratamiento(self, pestana):
         cursor = self.db.conn.cursor()
         cursor.execute("SELECT id, nombre FROM Animal")
         animales = [f"{id} - {nombre}" for id, nombre in cursor.fetchall()]
-        
+    
+        tk.Label(pestana, text="ID del Animal:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.id_animal_tratamiento = tk.Label(pestana, text="")
+        self.id_animal_tratamiento.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+    
+        tk.Label(pestana, text="Animal:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        combobox_animal = ttk.Combobox(pestana, values=animales, state="readonly")
+        combobox_animal.grid(row=1, column=1, padx=5, pady=5)
+        combobox_animal.bind("<<ComboboxSelected>>", lambda e: self.id_animal_tratamiento.config(
+        text=combobox_animal.get().split(" - ")[0]))
+    
         campos = [
-            ("Animal:", ttk.Combobox(pestana, values=animales, state="readonly")),
             ("Tipo:", ttk.Combobox(pestana, values=["Consulta", "Cirugía", "Control"], state="readonly")),
             ("Descripción:", tk.Entry(pestana)),
             ("Tratamiento:", tk.Entry(pestana))
         ]
-        
+    
         for i, (etiqueta, widget) in enumerate(campos):
-            tk.Label(pestana, text=etiqueta).grid(row=i, column=0, padx=5, pady=5, sticky="e")
-            widget.grid(row=i, column=1, padx=5, pady=5)
-        
+            tk.Label(pestana, text=etiqueta).grid(row=i+2, column=0, padx=5, pady=5, sticky="e")
+            widget.grid(row=i+2, column=1, padx=5, pady=5)
+    
         tk.Button(pestana, text="Registrar", 
                  command=lambda: self.registrar_tratamiento(
-                     campos[0][1].get().split(" - ")[0],
+                     combobox_animal.get().split(" - ")[0],
+                     campos[0][1].get(),
                      campos[1][1].get(),
                      campos[2][1].get(),
-                     campos[3][1].get()
-                 )).grid(row=len(campos), columnspan=2, pady=10)
+                     self.db
+                 )).grid(row=len(campos)+2, columnspan=2, pady=10)
 
-    def registrar_tratamiento(self, id_animal, tipo, descripcion, tratamiento):
+    def registrar_tratamiento(self, id_animal, tipo, descripcion, tratamiento, db):
+        try:
+           id_animal = int(id_animal)
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "ID de animal inválido")
+            return
+        
         veterinario = Veterinario(id=self.id_usuario)
-        if veterinario.registrar_tratamiento(id_animal, tipo, descripcion, tratamiento, self.db):
+        if veterinario.registrar_tratamiento(id_animal, tipo, descripcion, tratamiento, db):
             messagebox.showinfo("Éxito", "Tratamiento registrado")
 
     def pestana_registrar_vacuna(self, pestana):
         cursor = self.db.conn.cursor()
         cursor.execute("SELECT id, nombre FROM Animal")
         animales = [f"{id} - {nombre}" for id, nombre in cursor.fetchall()]
+    
+        tk.Label(pestana, text="ID del Animal:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.id_animal_vacuna = tk.Label(pestana, text="")
+        self.id_animal_vacuna.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+    
+        tk.Label(pestana, text="Animal:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        combobox_animal = ttk.Combobox(pestana, values=animales, state="readonly")
+        combobox_animal.grid(row=1, column=1, padx=5, pady=5)
+        combobox_animal.bind("<<ComboboxSelected>>", lambda e: self.id_animal_vacuna.config(
+        text=combobox_animal.get().split(" - ")[0]))
         
         campos = [
             ("Animal:", ttk.Combobox(pestana, values=animales, state="readonly")),
@@ -936,6 +1118,13 @@ class PanelPrincipal:
                  )).grid(row=len(campos), columnspan=2, pady=10)
 
     def registrar_vacuna(self, id_animal, vacuna, proxima_aplicacion):
+        try:
+            
+            id_animal = int(id_animal)  # Convertir a entero
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "ID de animal inválido")
+            return
+       
         veterinario = Veterinario(id=self.id_usuario)
         if veterinario.registrar_vacuna(id_animal, vacuna, proxima_aplicacion, self.db):
             messagebox.showinfo("Éxito", "Vacuna registrada")
@@ -1098,5 +1287,8 @@ class Veterinaria(tk.Tk):
         PanelPrincipal(self, self.db, rol, id_usuario, nombre_usuario)
 
 if __name__ == "__main__":
+    
+    db = Database()
+   
     app = Veterinaria()
     app.mainloop()
